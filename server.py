@@ -6,8 +6,9 @@ app = Flask(__name__)
 
 # Configure Gemini API
 # Set your API key as an environment variable: GEMINI_API_KEY
+SYSTEM_INSTRUCTION = "You are a mechanic"
 genai.configure(api_key=os.environ.get('GEMINI_API_KEY'))
-model = genai.GenerativeModel('gemini-2.5-flash' , contents="Explain how AI works in a few words")
+model = genai.GenerativeModel('gemini-2.5-flash', system_instruction=SYSTEM_INSTRUCTION)
 
 
 @app.route('/api', methods=['GET'])
