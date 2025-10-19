@@ -162,52 +162,145 @@ def hello():
     return 'Hello! Gemini API Flask Server is running.'
 
 
+# @app.route('/api/generate', methods=['POST'])
+# def generate():
+#     try:
+#         data = request.get_json()
+#
+#         if not data or 'prompt' not in data:
+#             return jsonify({'error': 'Please provide a prompt in the request body'}), 400
+#
+#         prompt = data['prompt']
+#         images = data.get('images', [])  # Array of base64 encoded images
+#
+#         # Build content list for Gemini
+#         content = [prompt]
+#
+#         # Add images if provided
+#         if images:
+#             import base64
+#             from PIL import Image
+#             import io
+#
+#             for img_data in images:
+#                 # Remove data URL prefix if present
+#                 if ',' in img_data:
+#                     img_data = img_data.split(',')[1]
+#
+#                 # Add padding if needed
+#                 missing_padding = len(img_data) % 4
+#                 if missing_padding:
+#                     img_data += '=' * (4 - missing_padding)
+#
+#                 # Decode base64 image
+#                 img_bytes = base64.b64decode(img_data)
+#                 img = Image.open(io.BytesIO(img_bytes))
+#                 content.append(img)
+#
+#         # Generate content using Gemini
+#         response = model.generate_content(content)
+#
+#         return jsonify({
+#             'success': True,
+#             'prompt': prompt,
+#             'images_count': len(images),
+#             'response': response.text
+#         })
+#
+#     except Exception as e:
+#         return jsonify({
+#             'success': False,
+#             'error': str(e)
+#         }), 500
+
 @app.route('/api/generate', methods=['POST'])
 def generate():
     try:
-        data = request.get_json()
+        # Check if request has files (multipart/form-data) or JSON
+        if request.files:
+            # Handle file upload from mobile app
+            prompt = request.form.get('prompt', '')
 
-        if not data or 'prompt' not in data:
-            return jsonify({'error': 'Please provide a prompt in the request body'}), 400
+            if not prompt:
+                return jsonify({'error': 'Please provide a prompt'}), 400
 
-        prompt = data['prompt']
-        images = data.get('images', [])  # Array of base64 encoded images
+            # Get uploaded images
+            uploaded_files = request.files.getlist('images')
 
-        # Build content list for Gemini
-        content = [prompt]
+            if not uploaded_files:
+                return jsonify({'error': 'No images provided'}), 400
 
-        # Add images if provided
-        if images:
-            import base64
+            # Build content list for Gemini
+            content = [prompt]
+
             from PIL import Image
             import io
 
-            for img_data in images:
-                # Remove data URL prefix if present
-                if ',' in img_data:
-                    img_data = img_data.split(',')[1]
-
-                # Decode base64 image
-                img_bytes = base64.b64decode(img_data)
+            for file in uploaded_files:
+                # Read the file and convert to PIL Image
+                img_bytes = file.read()
                 img = Image.open(io.BytesIO(img_bytes))
                 content.append(img)
 
-        # Generate content using Gemini
-        response = model.generate_content(content)
+            # Generate content using Gemini
+            response = model.generate_content(content)
 
-        return jsonify({
-            'success': True,
-            'prompt': prompt,
-            'images_count': len(images),
-            'response': response.text
-        })
+            return jsonify({
+                'success': True,
+                'prompt': prompt,
+                'images_count': len(uploaded_files),
+                'response': response.text
+            })
+
+        else:
+            # Handle JSON with base64 images (backward compatibility)
+            data = request.get_json()
+
+            if not data or 'prompt' not in data:
+                return jsonify({'error': 'Please provide a prompt in the request body'}), 400
+
+            prompt = data['prompt']
+            images = data.get('images', [])
+
+            # Build content list for Gemini
+            content = [prompt]
+
+            # Add images if provided
+            if images:
+                import base64
+                from PIL import Image
+                import io
+
+                for img_data in images:
+                    # Remove data URL prefix if present
+                    if ',' in img_data:
+                        img_data = img_data.split(',')[1]
+
+                    # Add padding if needed
+                    missing_padding = len(img_data) % 4
+                    if missing_padding:
+                        img_data += '=' * (4 - missing_padding)
+
+                    # Decode base64 image
+                    img_bytes = base64.b64decode(img_data)
+                    img = Image.open(io.BytesIO(img_bytes))
+                    content.append(img)
+
+            # Generate content using Gemini
+            response = model.generate_content(content)
+
+            return jsonify({
+                'success': True,
+                'prompt': prompt,
+                'images_count': len(images),
+                'response': response.text
+            })
 
     except Exception as e:
         return jsonify({
             'success': False,
             'error': str(e)
         }), 500
-
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
