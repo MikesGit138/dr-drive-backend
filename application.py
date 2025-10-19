@@ -7,19 +7,19 @@ from functools import wraps
 import jwt
 import os
 
-app = Flask(__name__)
+application = Flask(__name__)
 
 # Configure Database
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'postgresql://localhost/mechanic_db')
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-change-in-production')
-app.config['JWT_EXPIRATION_HOURS'] = 24
+application.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'postgresql://localhost/mechanic_db')
+application.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+application.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-change-in-production')
+application.config['JWT_EXPIRATION_HOURS'] = 24
 
-db = SQLAlchemy(app)
+db = SQLAlchemy(application)
 
 from flask_migrate import Migrate
 
-migrate = Migrate(app, db)
+migrate = Migrate(application, db)
 
 # Configure Gemini API
 SYSTEM_INSTRUCTION = ("  You are an expert automotive mechanic AI assistant. "
@@ -88,9 +88,9 @@ class User(db.Model):
             'make': self.make,
             'model': self.model,
             'chassis': self.chassis,
-            'exp': datetime.utcnow() + timedelta(hours=app.config['JWT_EXPIRATION_HOURS'])
+            'exp': datetime.utcnow() + timedelta(hours=application.config['JWT_EXPIRATION_HOURS'])
         }
-        return jwt.encode(payload, app.config['SECRET_KEY'], algorithm="HS256")
+        return jwt.encode(payload, application.config['SECRET_KEY'], algorithm="HS256")
 
 
 # JWT Token Decorator
@@ -112,7 +112,7 @@ def token_required(f):
 
         try:
             # Decode token
-            data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=["HS256"])
+            data = jwt.decode(token, application.config['SECRET_KEY'], algorithms=["HS256"])
             current_user = User.query.get(data['user_id'])
 
             if not current_user:
@@ -130,7 +130,7 @@ def token_required(f):
 
 
 # Auth Routes
-@app.route('/api/register', methods=['POST'])
+@application.route('/api/register', methods=['POST'])
 def register():
     try:
         data = request.get_json()
@@ -174,7 +174,7 @@ def register():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-@app.route('/api/login', methods=['POST'])
+@application.route('/api/login', methods=['POST'])
 def login():
     try:
         data = request.get_json()
@@ -202,7 +202,7 @@ def login():
 
 
 # Protected User Routes
-@app.route('/api/profile', methods=['GET'])
+@application.route('/api/profile', methods=['GET'])
 @token_required
 def get_profile(current_user, token_data):
     return jsonify({
@@ -217,7 +217,7 @@ def get_profile(current_user, token_data):
     })
 
 
-@app.route('/api/profile', methods=['PUT'])
+@application.route('/api/profile', methods=['PUT'])
 @token_required
 def update_profile(current_user, token_data):
     try:
@@ -257,7 +257,7 @@ def update_profile(current_user, token_data):
 
 
 # Admin Routes (kept for backward compatibility, but should be protected)
-@app.route('/api/users', methods=['GET'])
+@application.route('/api/users', methods=['GET'])
 def get_users():
     try:
         users = User.query.all()
@@ -270,12 +270,12 @@ def get_users():
 
 
 # Protected Gemini Routes
-@app.route('/api', methods=['GET'])
+@application.route('/api', methods=['GET'])
 def hello():
     return 'Hello! Gemini API Flask Server is running.'
 
 
-@app.route('/api/generate', methods=['POST'])
+@application.route('/api/generate', methods=['POST'])
 def generate():
     try:
         print(f"Content-Type: {request.content_type}")
@@ -370,7 +370,7 @@ def generate():
         }), 500
 
 
-@app.route('/api/chat', methods=['POST'])
+@application.route('/api/chat', methods=['POST'])
 @token_required
 def chat(current_user, token_data):
     try:
@@ -427,8 +427,8 @@ if __name__ == '__main__':
         print("Set it with: export GEMINI_API_KEY='your-api-key'")
 
     # Create database tables
-    with app.app_context():
+    with application.app_context():
         db.create_all()
         print("Database tables created successfully!")
 
-    app.run(debug=True, host='0.0.0.0', port=6000)
+    application.run(debug=True, host='0.0.0.0', port=6000)
