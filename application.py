@@ -18,10 +18,26 @@ app.config['JWT_EXPIRATION_HOURS'] = 24
 db = SQLAlchemy(app)
 
 from flask_migrate import Migrate
+
 migrate = Migrate(app, db)
 
 # Configure Gemini API
-SYSTEM_INSTRUCTION = "You are a mechanic"
+SYSTEM_INSTRUCTION = ("  You are an expert automotive mechanic AI assistant. "
+                      "Your exclusive role is to provide accurate diagnostic advice, "
+                      "explain repair procedures, discuss maintenance schedules, help users understand "
+                      "automotive systems, and guide them through troubleshooting vehicle problems. "
+                      "You will only assist with vehicle maintenance, repair, diagnostics, parts guidance, "
+                      "and mechanical safety procedures. You must refuse all requests outside this scope—including "
+                      "general knowledge, personal advice, creative writing, finance, legal matters, health topics, "
+                      "or any non-automotive subjects—by politely redirecting: 'I am specifically designed to help with automotive "
+                      "mechanical issues. Your question is outside my scope. Please ask me something about vehicle maintenance, "
+                      "repair, or diagnostics.' Never engage with off-topic content, provide partial answers to unrelated questions, "
+                      "or attempt to bridge non-mechanical topics to your expertise. When responding to mechanic-related queries, be "
+                      "specific and detailed in your instructions, provide step-by-step guidance for complex repairs, specify output "
+                      "formats when needed (like checklists or procedures), and if users share images of vehicles or parts, analyze the "
+                      "relevant details they provide and tailor your advice specifically to what you observe rather than giving generic "
+                      "responses. Always maintain professionalism and suggest professional service when safety or specialized equipment "
+                      "is required. " )
 genai.configure(api_key=os.environ.get('GEMINI_API_KEY'))
 model = genai.GenerativeModel('gemini-2.5-flash', system_instruction=SYSTEM_INSTRUCTION)
 
@@ -62,6 +78,20 @@ class User(db.Model):
             'updated_at': self.updated_at.isoformat()
         }
 
+    def generate_token(self):
+        """Generate JWT token with user claims including vehicle info"""
+        payload = {
+            'user_id': self.id,
+            'username': self.username,
+            'email': self.email,
+            'year': self.year,
+            'make': self.make,
+            'model': self.model,
+            'chassis': self.chassis,
+            'exp': datetime.utcnow() + timedelta(hours=app.config['JWT_EXPIRATION_HOURS'])
+        }
+        return jwt.encode(payload, app.config['SECRET_KEY'], algorithm="HS256")
+
 
 # JWT Token Decorator
 def token_required(f):
@@ -93,7 +123,8 @@ def token_required(f):
         except jwt.InvalidTokenError:
             return jsonify({'error': 'Token is invalid'}), 401
 
-        return f(current_user, *args, **kwargs)
+        # Pass the decoded token data as well
+        return f(current_user, data, *args, **kwargs)
 
     return decorated
 
@@ -128,11 +159,8 @@ def register():
         db.session.add(user)
         db.session.commit()
 
-        # Generate token
-        token = jwt.encode({
-            'user_id': user.id,
-            'exp': datetime.utcnow() + timedelta(hours=app.config['JWT_EXPIRATION_HOURS'])
-        }, app.config['SECRET_KEY'], algorithm="HS256")
+        # Generate token with vehicle claims
+        token = user.generate_token()
 
         return jsonify({
             'success': True,
@@ -159,11 +187,8 @@ def login():
         if not user or not user.check_password(data['password']):
             return jsonify({'error': 'Invalid username or password'}), 401
 
-        # Generate token
-        token = jwt.encode({
-            'user_id': user.id,
-            'exp': datetime.utcnow() + timedelta(hours=app.config['JWT_EXPIRATION_HOURS'])
-        }, app.config['SECRET_KEY'], algorithm="HS256")
+        # Generate token with vehicle claims
+        token = user.generate_token()
 
         return jsonify({
             'success': True,
@@ -179,16 +204,22 @@ def login():
 # Protected User Routes
 @app.route('/api/profile', methods=['GET'])
 @token_required
-def get_profile(current_user):
+def get_profile(current_user, token_data):
     return jsonify({
         'success': True,
-        'user': current_user.to_dict()
+        'user': current_user.to_dict(),
+        'token_claims': {
+            'year': token_data.get('year'),
+            'make': token_data.get('make'),
+            'model': token_data.get('model'),
+            'chassis': token_data.get('chassis')
+        }
     })
 
 
 @app.route('/api/profile', methods=['PUT'])
 @token_required
-def update_profile(current_user):
+def update_profile(current_user, token_data):
     try:
         data = request.get_json()
 
@@ -211,10 +242,14 @@ def update_profile(current_user):
 
         db.session.commit()
 
+        # Generate new token with updated claims
+        new_token = current_user.generate_token()
+
         return jsonify({
             'success': True,
             'message': 'Profile updated successfully',
-            'user': current_user.to_dict()
+            'user': current_user.to_dict(),
+            'token': new_token
         })
     except Exception as e:
         db.session.rollback()
@@ -334,9 +369,10 @@ def generate():
             'error': str(e)
         }), 500
 
+
 @app.route('/api/chat', methods=['POST'])
 @token_required
-def chat(current_user):
+def chat(current_user, token_data):
     try:
         data = request.get_json()
 
@@ -345,6 +381,11 @@ def chat(current_user):
 
         message = data['message']
         history = data.get('history', [])
+
+        # Optionally include vehicle info in the system context
+        vehicle_context = ""
+        if token_data.get('year') and token_data.get('make') and token_data.get('model'):
+            vehicle_context = f" The user has a {token_data['year']} {token_data['make']} {token_data['model']}."
 
         # Start a chat session
         chat = model.start_chat(history=history)
@@ -363,7 +404,13 @@ def chat(current_user):
             'message': message,
             'response': response.text,
             'history': history_json,
-            'user_id': current_user.id
+            'user_id': current_user.id,
+            'vehicle_info': {
+                'year': token_data.get('year'),
+                'make': token_data.get('make'),
+                'model': token_data.get('model'),
+                'chassis': token_data.get('chassis')
+            }
         })
 
     except Exception as e:
