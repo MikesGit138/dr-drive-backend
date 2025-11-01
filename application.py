@@ -6,6 +6,9 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from functools import wraps
 import jwt
 import os
+from googleapiclient.discovery import build
+from youtube_transcript_api import YouTubeTranscriptApi
+import re
 
 application = Flask(__name__)
 
@@ -42,6 +45,10 @@ BASE_SYSTEM_INSTRUCTION = ("You are an expert automotive mechanic AI assistant. 
                           "is required.")
 
 genai.configure(api_key=os.environ.get('GEMINI_API_KEY'))
+
+# Configure YouTube API
+YOUTUBE_API_KEY = os.environ.get('YOUTUBE_API_KEY')
+youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY) if YOUTUBE_API_KEY else None
 
 
 # User Model
@@ -180,6 +187,110 @@ def get_system_instruction_with_vehicle(token_data):
         return BASE_SYSTEM_INSTRUCTION + vehicle_info
     
     return BASE_SYSTEM_INSTRUCTION
+
+
+# YouTube Helper Functions
+def extract_video_id(url):
+    """Extract video ID from YouTube URL"""
+    pattern = r'(?:youtube\.com\/watch\?v=|youtu\.be\/)([a-zA-Z0-9_-]+)'
+    match = re.search(pattern, url)
+    return match.group(1) if match else None
+
+
+def search_youtube_videos(query, max_results=5):
+    """Search YouTube for videos related to the query"""
+    if not youtube:
+        return []
+    
+    try:
+        search_response = youtube.search().list(
+            q=query,
+            part='id,snippet',
+            maxResults=max_results,
+            type='video',
+            relevanceLanguage='en',
+            videoDuration='medium'  # Filter for medium length videos (4-20 min)
+        ).execute()
+
+        videos = []
+        for item in search_response.get('items', []):
+            video_id = item['id']['videoId']
+            videos.append({
+                'video_id': video_id,
+                'title': item['snippet']['title'],
+                'description': item['snippet']['description'],
+                'thumbnail': item['snippet']['thumbnails']['medium']['url'],
+                'channel': item['snippet']['channelTitle'],
+                'url': f'https://www.youtube.com/watch?v={video_id}'
+            })
+        
+        return videos
+    
+    except Exception as e:
+        print(f"Error searching YouTube: {str(e)}")
+        return []
+
+
+def get_video_transcript(video_id):
+    """Get transcript for a YouTube video"""
+    try:
+        transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+        
+        # Combine all transcript segments
+        full_transcript = ' '.join([entry['text'] for entry in transcript_list])
+        
+        return {
+            'success': True,
+            'transcript': full_transcript,
+            'segments': transcript_list
+        }
+    
+    except Exception as e:
+        print(f"Error getting transcript for video {video_id}: {str(e)}")
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
+
+def analyze_transcript_with_gemini(transcript, user_problem, vehicle_info):
+    """Use Gemini to analyze transcript and extract relevant repair information"""
+    
+    vehicle_str = f"{vehicle_info.get('year', '')} {vehicle_info.get('make', '')} {vehicle_info.get('model', '')}".strip()
+    
+    analysis_prompt = f"""
+You are analyzing a YouTube video transcript to help a user with their vehicle problem.
+
+USER'S VEHICLE: {vehicle_str if vehicle_str else 'Not specified'}
+USER'S PROBLEM: {user_problem}
+
+VIDEO TRANSCRIPT:
+{transcript[:8000]}  # Limit transcript length to avoid token limits
+
+Please analyze this transcript and:
+1. Determine if this video is relevant to the user's problem
+2. Extract key repair steps, diagnostic procedures, or useful information
+3. Identify any tools, parts, or safety precautions mentioned
+4. Provide a concise summary of how this video can help the user
+
+If the video is not relevant, explain why.
+
+Format your response as:
+RELEVANCE: [High/Medium/Low]
+KEY INSIGHTS: [bullet points of important information]
+TOOLS NEEDED: [list of tools mentioned]
+PARTS MENTIONED: [list of parts mentioned]
+SAFETY WARNINGS: [any safety concerns]
+SUMMARY: [2-3 sentence summary of how this helps]
+"""
+    
+    try:
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        response = model.generate_content(analysis_prompt)
+        return response.text
+    except Exception as e:
+        print(f"Error analyzing transcript: {str(e)}")
+        return None
 
 
 # Auth Routes
@@ -322,6 +433,111 @@ def get_users():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+# YouTube Search Routes
+@application.route('/api/search-videos', methods=['POST'])
+@token_required
+def search_videos(current_user, token_data):
+    """Search YouTube for repair videos and analyze transcripts"""
+    try:
+        data = request.get_json()
+        
+        if not data or 'query' not in data:
+            return jsonify({'error': 'Please provide a search query'}), 400
+        
+        user_query = data['query']
+        max_results = data.get('max_results', 3)
+        analyze_transcripts = data.get('analyze_transcripts', True)
+        
+        # Build search query with vehicle info
+        vehicle_info = {
+            'year': token_data.get('year'),
+            'make': token_data.get('make'),
+            'model': token_data.get('model')
+        }
+        
+        vehicle_str = f"{vehicle_info.get('year', '')} {vehicle_info.get('make', '')} {vehicle_info.get('model', '')}".strip()
+        
+        # Enhance query with vehicle info and repair keywords
+        search_query = f"{vehicle_str} {user_query} repair how to fix"
+        
+        print(f"Searching YouTube for: {search_query}")
+        
+        # Search YouTube
+        videos = search_youtube_videos(search_query, max_results)
+        
+        if not videos:
+            return jsonify({
+                'success': True,
+                'message': 'No videos found',
+                'videos': []
+            })
+        
+        # Analyze transcripts if requested
+        if analyze_transcripts:
+            for video in videos:
+                transcript_data = get_video_transcript(video['video_id'])
+                
+                if transcript_data['success']:
+                    video['has_transcript'] = True
+                    
+                    # Analyze with Gemini
+                    analysis = analyze_transcript_with_gemini(
+                        transcript_data['transcript'],
+                        user_query,
+                        vehicle_info
+                    )
+                    
+                    video['transcript_analysis'] = analysis
+                else:
+                    video['has_transcript'] = False
+                    video['transcript_error'] = transcript_data.get('error', 'Transcript not available')
+        
+        return jsonify({
+            'success': True,
+            'query': user_query,
+            'search_query': search_query,
+            'vehicle_info': vehicle_info,
+            'videos': videos,
+            'count': len(videos)
+        })
+    
+    except Exception as e:
+        print(f"Error in search_videos: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@application.route('/api/video-transcript/<video_id>', methods=['GET'])
+@token_required
+def get_transcript(current_user, token_data, video_id):
+    """Get transcript for a specific video"""
+    try:
+        transcript_data = get_video_transcript(video_id)
+        
+        if not transcript_data['success']:
+            return jsonify({
+                'success': False,
+                'error': transcript_data.get('error', 'Could not retrieve transcript')
+            }), 404
+        
+        return jsonify({
+            'success': True,
+            'video_id': video_id,
+            'transcript': transcript_data['transcript'],
+            'segments': transcript_data.get('segments', [])
+        })
+    
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
 # Protected Gemini Routes
 @application.route('/api', methods=['GET'])
 def hello():
@@ -369,8 +585,31 @@ def generate(current_user, token_data):
 
             # Generate content using Gemini
             response = model.generate_content(content)
-
-            return jsonify({
+            
+            # Always search for related videos
+            vehicle_str = f"{token_data.get('year', '')} {token_data.get('make', '')} {token_data.get('model', '')}".strip()
+            search_query = f"{vehicle_str} {prompt} repair"
+            videos = search_youtube_videos(search_query, max_results=3)
+            
+            # Analyze transcripts for the videos
+            for video in videos:
+                transcript_data = get_video_transcript(video['video_id'])
+                if transcript_data['success']:
+                    video['has_transcript'] = True
+                    analysis = analyze_transcript_with_gemini(
+                        transcript_data['transcript'],
+                        prompt,
+                        {
+                            'year': token_data.get('year'),
+                            'make': token_data.get('make'),
+                            'model': token_data.get('model')
+                        }
+                    )
+                    video['transcript_analysis'] = analysis
+                else:
+                    video['has_transcript'] = False
+            
+            result = {
                 'success': True,
                 'prompt': prompt,
                 'vehicle_info': {
@@ -380,8 +619,11 @@ def generate(current_user, token_data):
                     'chassis': token_data.get('chassis')
                 },
                 'images_count': len(uploaded_files),
-                'response': response.text
-            })
+                'response': response.text,
+                'related_videos': videos
+            }
+
+            return jsonify(result)
 
         else:
             # Handle JSON with base64 images (backward compatibility)
@@ -422,7 +664,30 @@ def generate(current_user, token_data):
             # Generate content using Gemini
             response = model.generate_content(content)
 
-            return jsonify({
+            # Always search for related videos
+            vehicle_str = f"{token_data.get('year', '')} {token_data.get('make', '')} {token_data.get('model', '')}".strip()
+            search_query = f"{vehicle_str} {prompt} repair"
+            videos = search_youtube_videos(search_query, max_results=3)
+            
+            # Analyze transcripts for the videos
+            for video in videos:
+                transcript_data = get_video_transcript(video['video_id'])
+                if transcript_data['success']:
+                    video['has_transcript'] = True
+                    analysis = analyze_transcript_with_gemini(
+                        transcript_data['transcript'],
+                        prompt,
+                        {
+                            'year': token_data.get('year'),
+                            'make': token_data.get('make'),
+                            'model': token_data.get('model')
+                        }
+                    )
+                    video['transcript_analysis'] = analysis
+                else:
+                    video['has_transcript'] = False
+            
+            result = {
                 'success': True,
                 'prompt': prompt,
                 'vehicle_info': {
@@ -432,8 +697,11 @@ def generate(current_user, token_data):
                     'chassis': token_data.get('chassis')
                 },
                 'images_count': len(images),
-                'response': response.text
-            })
+                'response': response.text,
+                'related_videos': videos
+            }
+
+            return jsonify(result)
 
     except Exception as e:
         print(f"Error in generate: {str(e)}")
@@ -473,7 +741,30 @@ def chat(current_user, token_data):
                 'parts': [{'text': part.text} for part in msg.parts]
             })
 
-        return jsonify({
+        # Always search for related videos
+        vehicle_str = f"{token_data.get('year', '')} {token_data.get('make', '')} {token_data.get('model', '')}".strip()
+        search_query = f"{vehicle_str} {message} repair"
+        videos = search_youtube_videos(search_query, max_results=3)
+        
+        # Analyze transcripts for the videos
+        for video in videos:
+            transcript_data = get_video_transcript(video['video_id'])
+            if transcript_data['success']:
+                video['has_transcript'] = True
+                analysis = analyze_transcript_with_gemini(
+                    transcript_data['transcript'],
+                    message,
+                    {
+                        'year': token_data.get('year'),
+                        'make': token_data.get('make'),
+                        'model': token_data.get('model')
+                    }
+                )
+                video['transcript_analysis'] = analysis
+            else:
+                video['has_transcript'] = False
+        
+        result = {
             'success': True,
             'message': message,
             'response': response.text,
@@ -484,8 +775,11 @@ def chat(current_user, token_data):
                 'make': token_data.get('make'),
                 'model': token_data.get('model'),
                 'chassis': token_data.get('chassis')
-            }
-        })
+            },
+            'related_videos': videos
+        }
+
+        return jsonify(result)
 
     except Exception as e:
         return jsonify({
@@ -495,10 +789,15 @@ def chat(current_user, token_data):
 
 
 if __name__ == '__main__':
-    # Check if API key is set
+    # Check if API keys are set
     if not os.environ.get('GEMINI_API_KEY'):
         print("Warning: GEMINI_API_KEY environment variable not set!")
         print("Set it with: export GEMINI_API_KEY='your-api-key'")
+    
+    if not os.environ.get('YOUTUBE_API_KEY'):
+        print("Warning: YOUTUBE_API_KEY environment variable not set!")
+        print("Set it with: export YOUTUBE_API_KEY='your-api-key'")
+        print("Get your key at: https://console.cloud.google.com/")
 
     # Create database tables
     with application.app_context():
